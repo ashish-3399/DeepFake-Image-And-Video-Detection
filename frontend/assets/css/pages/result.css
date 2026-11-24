@@ -1,0 +1,386 @@
+/* ============================================================
+   DeepShield AI — result.css (page-specific)
+   Verdict hero + confidence ring, media preview, metrics.
+   ============================================================ */
+
+/* ---- Layout ---- */
+.result-grid {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr;
+  gap: var(--s-3);
+  align-items: start;
+}
+
+.result-col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  min-width: 0;
+}
+
+/* Long values (file names) stay on one line and ellipsize */
+.result-grid .meta-row dd {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- Media preview ---- */
+.result-media-wrap { border-bottom: 1px solid var(--border); }
+
+.result-media {
+  width: 100%;
+  max-height: 320px;
+  object-fit: cover;
+  border-radius: calc(var(--r-lg) - 1px) calc(var(--r-lg) - 1px) 0 0;
+  background: var(--surface);
+}
+
+.media-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-1);
+  margin: var(--s-2);
+  padding: var(--s-6) var(--s-3);
+  border: 1.5px dashed var(--border-strong);
+  border-radius: var(--r-md);
+  color: var(--text-3);
+  font-size: 13px;
+  text-align: center;
+}
+.media-placeholder .icon-xl { color: var(--text-3); }
+
+/* ---- Verdict hero ---- */
+.verdict-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: var(--s-2);
+  padding-block: var(--s-5);
+}
+
+.ring-wrap {
+  position: relative;
+  width: 180px;
+  height: 180px;
+  margin-bottom: var(--s-1);
+}
+
+.confidence-ring {
+  width: 180px;
+  height: 180px;
+  transform: rotate(-90deg);
+}
+
+.ring-track {
+  fill: none;
+  stroke: rgba(148, 163, 184, 0.12);
+  stroke-width: 10;
+}
+
+.ring-value {
+  fill: none;
+  stroke-width: 10;
+  stroke-linecap: round;
+  /* dasharray/dashoffset set by result.js; transition animates the sweep */
+  transition: stroke-dashoffset 1000ms var(--ease);
+}
+.ring-value.real { stroke: var(--success); }
+.ring-value.fake { stroke: var(--danger); }
+
+.ring-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+}
+
+.ring-pct {
+  font-size: 40px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--text);
+}
+
+/* Bigger verdict badge (reuses badge-success / badge-danger colors) */
+.verdict-badge {
+  font-size: 15px;
+  font-weight: 600;
+  padding: 8px 18px;
+  gap: 8px;
+}
+.verdict-badge .icon { width: 18px; height: 18px; }
+
+.verdict-note { max-width: 420px; }
+
+/* ---- Analysis insights (explainability) ---- */
+.insight-flex {
+  display: flex;
+  gap: var(--s-3);
+  align-items: flex-start;
+}
+
+.insight-heat {
+  flex-shrink: 0;
+  width: 150px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: center;
+}
+.insight-heat img {
+  width: 150px;
+  height: 150px;
+  object-fit: cover;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border-strong);
+}
+
+.insight-side {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.votes { display: flex; flex-direction: column; gap: 10px; }
+
+.vote-row { display: flex; flex-direction: column; gap: 4px; }
+.vote-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.vote-head .mono { color: var(--text); }
+
+.vote-track {
+  height: 6px;
+  border-radius: var(--r-full);
+  background: rgba(148, 163, 184, 0.12);
+  overflow: hidden;
+}
+.vote-fill {
+  height: 100%;
+  border-radius: var(--r-full);
+  background: var(--success);
+  transition: width var(--t-slow) var(--ease);
+}
+.vote-fill.fake { background: var(--danger); }
+
+@media (max-width: 640px) {
+  .insight-flex { flex-direction: column; }
+  .insight-heat { width: 100%; }
+  .insight-heat img { width: 100%; height: auto; max-height: 240px; }
+}
+
+/* ---- Verdict feedback ---- */
+.feedback-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+.feedback-btns { display: flex; align-items: center; gap: var(--s-1); }
+.feedback-thanks { margin: 0; }
+
+/* Quiet third option — visible, but never competing with the real answers */
+.btn-skip {
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  color: var(--text-3);
+  transition: color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+.btn-skip:hover { color: var(--text-2); background: rgba(148, 163, 184, 0.08); }
+
+@media (max-width: 640px) {
+  .feedback-row { flex-direction: column; align-items: stretch; }
+  .feedback-btns .btn { flex: 1; }
+}
+
+/* ---- Metrics row (3-up stat cards) ---- */
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--s-2);
+}
+.metrics-grid .stat-value { font-size: 22px; }
+
+/* ---- Actions ---- */
+.result-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+}
+.result-actions .btn-primary { margin-left: auto; }
+
+/* ---- Responsive ---- */
+@media (max-width: 1024px) {
+  .result-grid { grid-template-columns: 1fr; }
+  /* verdict first when stacked */
+  .result-col-right { order: -1; }
+}
+
+@media (max-width: 640px) {
+  .metrics-grid { grid-template-columns: 1fr; }
+  .result-actions .btn { flex: 1 1 auto; }
+  .result-actions .btn-primary { margin-left: 0; }
+}
+
+/* ---- Video analysis (Phase 6) ---- */
+.vt-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  margin-top: var(--s-3);
+}
+
+/* Frame timeline: one bar per sampled frame, height = that frame's score.
+   Bars flex so sixty frames and six frames both fill the width. */
+.vt-track {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 56px;
+  padding: var(--s-1);
+  border-radius: var(--r-sm);
+  background: rgba(148, 163, 184, 0.08);
+  overflow: hidden;
+}
+.vt-bar {
+  flex: 1 1 0;
+  min-width: 2px;
+  min-height: 2px;
+  border-radius: 2px;
+  background: var(--success);
+  transition: height var(--t-slow) var(--ease);
+}
+.vt-bar.suspicious { background: var(--danger); }
+
+.vt-axis {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.vt-marks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1);
+}
+.vt-mark {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--s-1);
+  padding: 4px 10px;
+  border-radius: var(--r-full);
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text);
+}
+.vt-mark .vt-mark-score { color: var(--text-3); font-size: 11px; }
+
+/* ---- Verdict facts + Why (Phase 8) ---- */
+.verdict-facts {
+  width: 100%;
+  margin-top: var(--s-3);
+  padding-top: var(--s-3);
+  border-top: 1px solid var(--border);
+}
+
+.engine-badge { gap: 6px; }
+
+.verdict-why {
+  width: 100%;
+  margin-top: var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-md);
+  background: rgba(59, 130, 246, 0.06);
+  border: 1px solid rgba(59, 130, 246, 0.18);
+  text-align: left;
+}
+.verdict-why-title {
+  display: block;
+  font-family: var(--font-heading);
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.why-list {
+  list-style: none;
+  margin: var(--s-2) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.why-list li {
+  display: grid;
+  grid-template-columns: minmax(90px, auto) 1fr;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: 13px;
+  color: var(--text-2);
+}
+.why-list li::before {
+  content: none;
+}
+.why-name { text-transform: capitalize; }
+
+/* The bar is the measurement, not decoration: it is how far the score
+   moved when that region was hidden, relative to the strongest one. */
+.why-bar {
+  height: 6px;
+  border-radius: var(--r-full);
+  background: rgba(148, 163, 184, 0.14);
+  overflow: hidden;
+}
+.why-fill {
+  display: block;
+  height: 100%;
+  border-radius: var(--r-full);
+  background: var(--primary);
+}
+
+.verdict-cta {
+  margin-top: var(--s-3);
+  width: 100%;
+  justify-content: center;
+}
+
+@media (max-width: 640px) {
+  .why-list li { grid-template-columns: 1fr; gap: 2px; }
+  .verdict-why { padding: var(--s-2); }
+}
+
+/* ---- Scope of the verdict ----
+   Sits directly under the verdict note rather than in the insight column,
+   because it qualifies the number in the ring. Someone who reads only the
+   big number and leaves is exactly the person this is for. */
+.scope-note {
+  max-width: 420px;
+  margin-top: var(--s-4);
+  padding: var(--s-3);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warning, #d97706);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  text-align: left;
+}
+.scope-note .badge { margin-bottom: var(--s-2); }
+.scope-note p { margin: 0; line-height: 1.5; }

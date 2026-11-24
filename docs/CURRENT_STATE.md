@@ -1,0 +1,555 @@
+# DeepShield AI — Current State
+
+**Baseline snapshot.** Everything below was read from the running system on
+the date shown, not from memory. Figures marked *measured* come from a run
+recorded in this document.
+
+| | |
+|---|---|
+| Snapshot date | 2026-08-10 (updated after Phase 11) |
+| Commit | `ab0103d983ed5b272f964ee3cc750a91116b3c8c` (`ab0103d`) |
+| Commit subject | Run the model as ONNX: 1.9 GB backend becomes 197 MB |
+| Branch | `main`, clean working tree, 31 commits |
+| Remote | https://github.com/kumudranjan6127-debug/deepshield-ai |
+| Machine used for measurements | Windows 10, 4 CPU cores, CPU-only |
+
+---
+
+## 1. Model in production
+
+**MobileNetV3-Large · ONNX · 224×224 · classes `["fake", "real"]` · V3-Max.**
+This is the single source of truth; see `MODEL_CARD.md` for the full card.
+
+| Artifact | Size | Role |
+|---|---|---|
+| `models/deepshield.onnx` | 16.8 MB | **The live model.** Loaded by default |
+| `models/deepshield.onnx.json` | ~700 B | Identity block, classes, input size, normalisation, metrics |
+| `models/deepshield_mobilenetv3.pth` | 17.0 MB | Same weights, PyTorch. Fallback only |
+| `models/face_detection_yunet.onnx` | 232 KB | YuNet face detector |
+| `models/archive/v1_baseline.pth` | 6.2 MB | History |
+| `models/archive/v2_heavy.pth` | 6.2 MB | History |
+| `models/archive/v3_max.pth` | 17.0 MB | History — same weights as the live model |
+
+`models/deepshield.onnx.json` (verbatim):
+
+```json
+{
+  "model_name": "DeepShield",
+  "architecture": "MobileNetV3-Large",
+  "version": "V3-Max",
+  "runtime": "ONNX",
+  "arch": "mobilenet_v3_large",
+  "classes": ["fake", "real"],
+  "input_size": 224,
+  "normalize": { "mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225] },
+  "val_accuracy": 99.9,
+  "robust_val_accuracy": 99.18,
+  "tpdn_accuracy": 100.0,
+  "dfdc_accuracy": null,
+  "test_accuracy": null,
+  "trained_on": "V3-Max multi-generator: SG1 + TPDN/SG2 + diffusion, 10 epochs, large",
+  "source_checkpoint": "deepshield_mobilenetv3.pth"
+}
+```
+
+### Backend selection
+
+`backend/inference.py` picks a runtime at load:
+
+1. **`onnx`** — chosen when `deepshield.onnx` **and** its `.json` exist. Runs
+   through `cv2.dnn`. No PyTorch needed. *This is the active path.*
+2. **`torch`** — used only when no ONNX export is present and torch is
+   importable.
+3. Neither available → `engine_available()` is false, the app serves the
+   simulated engine and labels itself "Simulated (demo)".
+
+Both backends share preprocessing and were verified to agree to **3.24e-07**
+on output probabilities (`scripts/export_onnx.py` re-checks this on export).
+
+---
+
+## 2. Inference pipeline (what one image goes through)
+
+```
+upload → staged in uploads/ by POST /api/upload
+   ↓
+image capped at 1024px longest side (INTER_AREA)
+   ↓
+YuNet face detection → largest face, 0.35 margin crop
+   ↓  (no face found → whole frame is used)
+JPEG q88 round-trip                  ← compression-domain normalisation
+   ↓
+resize 224×224 (PIL BILINEAR) → /255 → ImageNet normalise → CHW
+   ↓
+forward ×2 (image + horizontal mirror), probabilities averaged   ← TTA
+   ↓
+optional verifiers (off by default)
+   ↓
+verdict + confidence + risk + occlusion heatmap
+   ↓
+uploaded file deleted
+```
+
+**Video:** one frame per second (`frameRate` setting, max 60 frames), each
+frame through the same path. Verifiers and heatmap are not run per-frame.
+
+Frame scores are then combined three ways at once, because each summary is
+blind to something the others catch:
+
+```
+per-frame P(fake)
+   |
+   +-- median  0.40   the typical frame; a handful of outliers cannot move it
+   +-- mean    0.25   the overall level
+   +-- top-k   0.35   k = 15% of frames, so localised manipulation still
+   |                  registers but no single frame decides
+   v
+combined score -> verdict, and every component is returned
+```
+
+Averaging alone dilutes a clip that is only partly manipulated; taking the
+maximum lets one blurred frame call a real video fake. A frame counts as
+**suspicious** at 0.70 — the same boundary Phase 5 calls "strong evidence",
+rather than a second threshold invented here.
+
+The weights are **provisional**: no labelled video set has been scored, so
+they are reasoned rather than fitted, and they lean on the median because a
+false accusation costs more than a missed forgery. `tests/test_video.py`
+pins the behaviour they produce.
+
+**Combining votes** (`inference.analyze_file`): own model weight **0.75**, the
+remaining 0.25 split across verifiers. Verifiers may raise the score only when
+**all** of them are ≥ 0.85. `disputed` is set when any vote disagrees with the
+final verdict.
+
+---
+
+## 3. HTTP API
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/` | Serves `frontend/landing.html` |
+| GET | `/<path>` | Static files from `frontend/` only |
+| GET | `/api/health` | Engine, backend, model identity, metrics |
+| GET | `/api/version` | The short answer: status, engine, model, runtime, device |
+| POST | `/api/upload` | Stages a file, returns `uploadId` |
+| POST | `/api/analyze` | Runs the analysis |
+| POST | `/api/feedback` | Records a thumbs up/down (no media) |
+
+### GET /api/health — live response
+
+```json
+{
+  "ok": true,
+  "status": "healthy",
+  "engine": "live",
+  "model_name": "DeepShield",
+  "architecture": "MobileNetV3-Large",
+  "version": "V3-Max",
+  "runtime": "ONNX",
+  "input_size": 224,
+  "classes": ["fake", "real"],
+  "backend": "onnx",
+  "checkpoint": "deepshield.onnx",
+  "arch": "mobilenet_v3_large",
+  "params": "5.4M",
+  "val_accuracy": 99.9,
+  "tpdn_accuracy": 100,
+  "test_accuracy": null,
+  "dfdc_accuracy": null,
+  "trained_on": "V3-Max multi-generator: SG1 + TPDN/SG2 + diffusion, 10 epochs, large",
+  "verifiers": false,
+  "calibrated": false,
+  "certainty_bands": [
+    { "from": 90, "to": 100, "key": "very_strong",  "label": "Very strong evidence" },
+    { "from": 70, "to":  90, "key": "strong",       "label": "Strong evidence" },
+    { "from": 30, "to":  70, "key": "uncertain",    "label": "Uncertain" },
+    { "from":  0, "to":  30, "key": "low_evidence", "label": "Low evidence" }
+  ],
+  "model": {
+    "model_name": "DeepShield", "architecture": "MobileNetV3-Large",
+    "version": "V3-Max", "runtime": "ONNX", "input_size": 224,
+    "name": "MobileNetV3-Large", "params": "5.4M",
+    "input": "224 × 224", "backend": "ONNX", "device": "CPU"
+  }
+}
+```
+
+Every field is read from `models/deepshield.onnx.json` at load; no model
+fact is written twice. `tests/test_model_parity.py` asserts the metadata file,
+the loaded engine and this response agree.
+
+### POST /api/analyze
+
+Accepts either multipart (`file`, `fileType`, `frameRate`) or JSON
+(`uploadId` | `url`, `fileName`, `fileType`, `fileSize`, `frameRate`).
+
+Live response for an image (heatmap abbreviated):
+
+```json
+{
+  "ok": true,
+  "prediction": "real",
+  "confidence": 94,
+  "riskLevel": "Low",
+  "risk": "low",
+  "certainty": "very_strong",
+  "engine": "live",
+  "framesAnalyzed": 1,
+  "processingTime": 831,
+  "model": "MobileNetV3-Large",
+  "device": "CPU",
+  "completedAt": "2026-08-10T14:14:03.589570+00:00",
+  "disputed": false,
+  "ensemble": [ { "model": "MobileNetV3 (ours)", "pFake": 0.0612, "weight": 1 } ],
+  "explain": {
+    "focusRegion": "the eye region",
+    "regions": [
+      { "name": "the eye region", "weight": 1.0 },
+      { "name": "the mouth area", "weight": 0.44 }
+    ],
+    "method": "occlusion sensitivity",
+    "note": "Prediction was most sensitive to the eye region.",
+    "heatmapDataUrl": "data:image/jpeg;base64,… (11,291 chars)"
+  }
+}
+```
+
+**Contract notes**
+- `prediction` ∈ `"real" | "deepfake"`; `confidence` is an integer percent of
+  the winning class; `riskLevel` ∈ `"Low" | "Medium" | "High"`.
+- `ensemble[0]` is always our own model. `pFake` is its raw probability.
+- `certainty` is the evidence band for `confidence`; `risk` is `riskLevel`
+  lowercased. Both are additive — `riskLevel` is what the pages read, and
+  the band table is published by `/api/health` so no threshold is written
+  down in the browser. The model is uncalibrated, so `confidence` ranks
+  evidence and does not estimate a frequency.
+- `engine` is `"live"` when a model analysed the media and `"simulated"`
+  when the demo verdict was used. `/api/health` reports the engine too, but
+  that is a different request at a different moment — a result read back
+  from history carries its own provenance.
+- `explain.regions` ranks every region the prediction leaned on, weighted by
+  how far the score moved when each was hidden and normalised to the
+  strongest. Regions below a quarter of the top are dropped, at most three
+  survive, and `regions[0].name` always equals `focusRegion`.
+- `explain` is absent for video scans and may be `null` if the heatmap fails.
+- A **video** scan carries a `video` block instead: `framesAnalyzed`,
+  `suspiciousFrames`, `suspiciousAt`, `peakFakeScore`, `medianFakeScore`,
+  `meanFakeScore`, `topKFakeScore`, `lowestFakeScore`, `scoreVariance`,
+  `combinedScore`, `k`, `weights`, `topTimestamps` (`{time, timestamp,
+  score}`), `timeline` (`{t, p}` per sampled frame), `temporal`, `fps`,
+  `sampledEveryNthFrame` and `durationSeconds`. The score is reproducible
+  from the response alone: it is exactly `weights` applied to the three
+  components.
+- `video.temporal` holds face-consistency signals — `facesFound`,
+  `framesSampled`, `facePositionJitter`, `faceSizeJitter`, `landmarkJitter`,
+  `appearanceContinuity`. They are **descriptive and do not affect the
+  verdict**; nothing has validated what value of any of them means
+  manipulation. Each is `null` when too few frames carried a face.
+- `POST /api/feedback` requires a boolean `agree`; anything else returns 400.
+- Failures share one shape: `{"ok": false, "error": "…", "error_code": "…"}`.
+  Codes in use: `NO_FILE`, `BAD_TYPE`, `BAD_MIME`, `BAD_MAGIC`,
+  `EMPTY_FILE`, `CORRUPT_MEDIA`, `IMAGE_TOO_LARGE`, `IMAGE_TOO_SMALL`,
+  `VIDEO_TOO_LONG`, `TOO_LARGE`, `BLOCKED_URL`, `INSECURE_URL`,
+  `URL_NOT_VIDEO`, `BAD_FIELD`, `RATE_LIMITED` (429), `BUSY` (503),
+  `INVALID_INPUT`, `INTERNAL`. A missing **page** stays a normal HTML 404;
+  only `/api/*` returns JSON errors.
+
+---
+
+## 3c. Production configuration
+
+Everything below is off or empty by default: a local run needs no TLS and a
+same-origin deployment needs no CORS. Putting the app behind a proxy is a
+configuration change, not a code change.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `DS_CORS_ORIGINS` | *(empty)* | Comma-separated allow-list. Never `*` — this API accepts uploads and fetches URLs on the caller's behalf |
+| `DS_FORCE_HTTPS` | off | Redirect `GET`/`HEAD` to https (308); refuse writes with `INSECURE_REQUEST` rather than dropping the body |
+| `DS_TRUST_PROXY` | off | Whether `X-Forwarded-Proto` / `-For` may be believed |
+| `DS_HSTS_SECONDS` | 180 days | HSTS lifetime, sent **only** over TLS |
+| `DS_LOG_FILE` | *(empty)* | Rotating file handler, 5 MB × 3 |
+| `DS_LOG_JSON` | off | One JSON object per line for a log collector |
+| `DS_RATE_LIMIT` / `DS_RATE_WINDOW` | 5 / 60 s | Per-client request budget |
+| `DS_WORKERS` / `DS_QUEUE_WAIT` | 2 / 20 s | Concurrent analyses, then 503 |
+| `DS_UPLOAD_TTL` / `DS_CLEANUP_INTERVAL` | 30 min / 5 min | Staged-upload sweep |
+
+Every response — API, static page and error alike — carries:
+
+```
+Content-Security-Policy   default-src 'self'; script-src 'self'; object-src 'none';
+                          frame-ancestors 'none'; img-src 'self' data: blob'; …
+X-Content-Type-Options    nosniff
+X-Frame-Options           DENY
+Referrer-Policy           strict-origin-when-cross-origin
+Permissions-Policy        camera=(), microphone=(), geolocation=(), payment=(), usb=()
+Cross-Origin-Opener-Policy / -Resource-Policy   same-origin
+Strict-Transport-Security only when the request arrived over TLS
+```
+
+The CSP allows no inline script and no remote origin. `tests/test_security.py`
+asserts the frontend contains nothing the policy would block, because a policy
+the app violates is a policy someone eventually switches off.
+
+Unexpected failures return an `incident` id that matches a logged traceback,
+so a report of "it said something went wrong" can be traced without asking
+the user to reproduce it.
+
+## 4. Request handling and security
+
+Every request passes the same gates, cheapest first:
+
+```
+rate limit (5/min per client)
+   ↓
+upload:  MAX_CONTENT_LENGTH → extension → MIME → magic bytes
+   ↓                        → decode → dimensions / duration
+url:     https → DNS → every resolved address must be public
+   ↓            → each redirect re-validated
+concurrency gate (2 analyses at once, then 503)
+   ↓
+inference
+```
+
+Blocked outbound destinations: loopback, private (10/8, 172.16/12,
+192.168/16), link-local (169.254/16 — cloud metadata), reserved,
+multicast, and the IPv6 equivalents including `::1`, `fe80::/10`,
+`fc00::/7` and `::ffff:` mapped addresses.
+
+Staged uploads are swept after 30 minutes by a background thread and at
+startup; an analysed file is deleted as soon as the verdict is returned.
+
+Implemented in `backend/security.py`; limits live in `config.py`.
+
+## 5. Frontend
+
+Framework-free HTML/CSS/JS. 11 pages:
+
+`landing.html` (served at `/`) · `index.html` (splash) · `login.html` ·
+`dashboard.html` · `upload-image.html` · `upload-video.html` ·
+`processing.html` · `result.html` · `report.html` · `about.html` ·
+`settings.html`
+
+**Flow:** landing → splash → login (or guest) → dashboard → upload →
+processing → result → report.
+
+**Global `DS` namespace** (`assets/js/utils.js`, `api.js`, `components.js`):
+`DS.util` · `DS.store` · `DS.session` · `DS.history` · `DS.settings` ·
+`DS.auth` · `DS.api` · `DS.server` · `DS.toast` · `DS.modal` · `DS.sidebar` ·
+`DS.shell` · `DS.icons` · `DS.glare`
+
+**Browser storage**
+
+| Key | Store | Contents |
+|---|---|---|
+| `ds_user` | local | `{name, email, loggedInAt}` |
+| `ds_scan` | session | the scan in flight |
+| `ds_history` | local | completed scans, newest first, capped at 50 |
+| `ds_settings` | local | `{frameRate, threshold, reducedMotion, autoDelete, effects}` |
+| `ds_feedback` | local | verdict ratings — **not registered in `DS.KEYS`**, see `KNOWN_ISSUES.md` #2 |
+
+**Engine mode:** `DS.api.MODE = 'auto'` — probes `/api/health` once per page.
+Live engine → real analysis; otherwise the simulated engine, labelled
+"Simulated (demo)" on the dashboard and in Settings.
+
+---
+
+## 6. Dependencies
+
+**Runtime (`requirements.txt`)** — the lean install, ~197 MB:
+
+```
+flask>=3.1
+opencv-python>=4.8
+pillow>=10.0
+numpy>=1.24
+```
+
+**Present in this development venv** (a superset — training and export tools):
+
+| Package | Version |
+|---|---|
+| Flask | 3.1.3 |
+| opencv-python | 5.0.0.93 |
+| numpy | 2.4.4 |
+| pillow | 12.2.0 |
+| torch | 2.13.0+cpu |
+| torchvision | 0.28.0+cpu |
+| transformers | 5.14.1 |
+| onnx / onnxscript | 1.22.0 / 0.7.1 |
+| Werkzeug / Jinja2 | 3.1.8 / 3.1.6 |
+
+Python 3.14.7 · Node v24.17.0 (Node runs only `scripts/ds.js` and `serve.js`).
+
+**Optional extras:** `torch torchvision onnx onnxscript` for training/export;
+`transformers torch` for the verifiers; both unnecessary to run the app.
+
+### Environment switches
+
+| Variable | Default | Effect |
+|---|---|---|
+| `PORT` | 5000 | Backend port |
+| `DS_DEBUG` | off | `1` enables Flask's reloader (spawns a second process) |
+| `DS_ENGINE` | unset | `echo` forces the simulated engine — verified working |
+| `DS_VERIFIERS` | off | `1` loads the two HuggingFace verifiers |
+
+---
+
+## 7. Measured performance
+
+`python scripts/benchmark.py` produces this. Median of 3 runs, 4 cores,
+CPU-only, ONNX backend, verifiers off. Stages are disjoint — the forwards
+that happen *inside* the heatmap are billed to `explain`, not counted twice.
+
+| Case | decode+detect | normalise | prepare | forward | explain | other | **total** |
+|---|---|---|---|---|---|---|---|
+| image 224px | 0.004 | 0.002 | 0.004 | 0.018 | **0.390** | — | **0.42 s** |
+| image 1024px | 0.072 | 0.016 | 0.017 | 0.019 | **0.377** | — | **0.49 s** |
+| video 10 s | 0.139 | 0.028 | 0.048 | 0.186 | — | 0.093 | **0.49 s** |
+| video 30 s | 0.447 | 0.086 | 0.166 | 0.599 | — | 0.266 | **1.57 s** |
+| video 60 s | 0.890 | 0.174 | 0.291 | 1.179 | — | 0.453 | **2.99 s** |
+
+**Images are the heatmap.** Occlusion sensitivity is **93%** of a 224px
+image's latency and 76% of a 1024px one — 36 extra forward passes to explain
+a verdict the model reached in 18 ms. Chunk size is not the lever: 36
+forwards take 320–331 ms whether they go through in batches of 4, 8, 12, 16
+or 18, so the `MAX_FORWARD_BATCH = 8` guard costs nothing.
+
+**Video is linear**, ~50 ms per sampled frame at every length, so there is no
+fixed overhead to attack — only per-frame work.
+
+| Case | frames | peak RSS | over baseline | CPU s/run | cores used |
+|---|---|---|---|---|---|
+| image 224px | 1 | 184 MB | 43 MB | 0.92 | 2.2 |
+| image 1024px | 1 | 260 MB | 52 MB | 1.17 | 2.4 |
+| video 60 s | 60 | 230 MB | 16 MB | 6.09 | 2.0 |
+
+Peak RSS stays inside a 512 MB tier. Note the benchmark clips are 480×480 at
+10 fps — a phone shoots 720p at 30 fps, where decode costs more.
+
+**Footprint:** backend dependencies 197 MB, model 16.8 MB, peak RAM ~260 MB.
+
+---
+
+## 8. Accuracy on the held test images
+
+Nine images kept outside training: five thispersondoesnotexist (StyleGAN2)
+faces and one authentic press portrait at four resolutions.
+
+| Image | Truth | Verdict | Own model P(fake) |
+|---|---|---|---|
+| random-person (1) | fake | fake 98% | 0.9757 |
+| random-person (2) | fake | fake 97% | 0.9725 |
+| random-person (3) | fake | fake 98% | 0.9766 |
+| random-person (4) | fake | fake 97% | 0.9724 |
+| random-person | fake | fake 97% | 0.9748 |
+| press portrait 2687px | real | real 94% | 0.0612 |
+| press portrait 1024px | real | real 98% | 0.0189 |
+| press portrait 512px | real | real 98% | 0.0233 |
+| press portrait 256px | real | real 98% | 0.0234 |
+
+**9/9.** Identical under the PyTorch backend and in a clean environment with
+no PyTorch installed. This is a small sample and is not a benchmark result —
+see `MODEL_CARD.md` for what has and has not been evaluated.
+
+## 9. Repository layout
+
+```
+frontend/          11 pages + assets (css, js, fonts, icons)
+backend/           app.py (267 lines) · inference.py (565 lines)
+models/            live ONNX + metadata + YuNet + archive/
+training/          Kaggle/Colab notebooks, result graphs, test media
+scripts/           ds.js (server control) · export_onnx.py (.pth → ONNX)
+                   evaluate.py + ds_metrics.py (evaluation)
+                   regression_test.py (baseline record/verify)
+tests/             the test suite — pytest, no server, no network
+  conftest.py      builds every fixture image and clip from repo material
+  fixtures/        generated on each run, gitignored
+eval_data/         labelled images to evaluate on (gitignored)
+docs/              this file, MODEL_CARD.md, KNOWN_ISSUES.md, DOCUMENTATION.md
+uploads/ data/     runtime only, gitignored
+venv/              local environment, gitignored
+```
+
+**Operating the server:** `npm start` · `npm run status` · `npm run stop` ·
+`npm run restart`, or the `START-/STOP-DeepShield.bat` files.
+
+---
+
+## 10. Tests
+
+```
+python -m pytest                       the whole suite, ~20 s, no server
+python -m pytest -m security           one category
+python -m pytest -m "not slow"         skip anything that loads the model
+python scripts/regression_test.py record|verify    behaviour has not changed
+```
+
+`tests/` is the suite. It runs against Flask's test client rather than a
+live server, so nothing has to be started first and no rate limit has to be
+raised — an earlier arrangement needed both, and forgetting either produced
+failures that looked like bugs.
+
+| File | Tests | What it holds |
+|---|---|---|
+| `test_api.py` | 25 | Endpoint contracts: response fields, error shape, `error` stays a plain string, a missing page stays HTML |
+| `test_upload.py` | 21 | An extension is not evidence — size, MIME, magic bytes, decoder, dimensions; renamed executables, HTML, zips and PDFs; decompression bombs; the analysed file is deleted |
+| `test_validation.py` | 22 | Field validation, URL validation, media validation, and the error-code vocabulary pinned against renames |
+| `test_security.py` | 76 | SSRF across IPv4/IPv6/mapped/DNS, **path traversal** through `uploadId` and the static route, rate limiting, the concurrency gate, upload sweeping |
+| `test_inference.py` | 29 | Real vs generated, no face, two faces, a tiny face, a 3000px image, heavy compression, reproducibility, the explanation |
+| `test_video.py` | 36 | Aggregation against sequences whose answer is obvious by construction, temporal signals, the 60-frame cap, empty and corrupt clips |
+| `test_model_parity.py` | 25 | Identity agrees across file/engine/API; ONNX vs PyTorch within 1e-4 (measured 3.2e-08); the certainty bands are total |
+| `test_metrics.py` | 19 | Hand-computed answers, ROC-AUC against brute-force pair counting, PR-AUC against a threshold walk, calibration |
+| `test_split.py` | 8 | Lifts the DFDC split out of the V4 notebook and runs it on a synthetic set whose leakage structure is known |
+| **total** | **261** | in ~20 s |
+
+Test media is **generated, never committed**. `tests/conftest.py` builds every
+image and clip from the sample faces and the authentic-portrait clip already
+in the repository, so the fixtures are deterministic and cost nothing in git.
+The one thing it cannot synthesise is a genuine face, so `real_face` is a
+frame extracted from `training/video_test/authentic_portrait.mp4` — without
+it the suite could only ever check that fakes look fake.
+
+Nothing touches the network. DNS is stubbed where the SSRF logic needs to
+resolve a name, so the suite runs on a plane and cannot be affected by who
+currently owns a convenient wildcard domain.
+
+`scripts/regression_test.py` is kept separately because it is a different
+tool: it records what the system currently does into
+`docs/regression_baseline.json` and diffs against it, which answers "did this
+refactor change anything" rather than "is this correct". It needs the server
+running, and both it and the server want `DS_RATE_LIMIT=50` — pass it to
+`ds.js` itself, since a plain `restart` drops the variable.
+
+---
+
+## 11. Evaluation
+
+```
+python scripts/evaluate.py                        scores eval_data/
+python scripts/evaluate.py --seen sg1,sg2,dfdc    in-domain vs unseen
+python scripts/evaluate.py --from-csv preds.csv   re-score a training run
+python scripts/evaluate.py --conditions DIR       phone/screenshot/social variants
+```
+
+The report has four parts: the metric block, a per-source table, a threshold
+sweep, and a **calibration** section — reliability diagram, ECE, MCE, Brier,
+plus the observed accuracy and occupancy of every certainty band. That last
+table is how a band label stops being a guess: a band called "Strong
+evidence" that is right 61% of the time has the wrong cut point, and an empty
+band cannot be produced at all.
+
+`ds_metrics.py` holds the arithmetic — accuracy, precision, recall, F1,
+specificity, ROC-AUC, PR-AUC, FPR, FNR, Brier, ECE, MCE — and nothing else computes a metric,
+including the training notebook. The notebook emits raw scores as
+`predictions_*.csv`; `--from-csv` turns them into the report. Kaggle numbers
+and local numbers are therefore the same arithmetic, and any published figure
+can be recomputed from the CSV behind it.
+
+Scoring calls `inference.score_image`, the request path's own preprocessing
+minus the heatmap. Undefined metrics print `n/a`: a ROC-AUC over one class is
+not 0.5.
+
+Drop data into `eval_data/` — see `eval_data/README.md` for the layout and
+the identity-separation rules. The folder is gitignored apart from that file.
