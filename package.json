@@ -8,6 +8,7 @@
     "stop": "node scripts/ds.js stop",
     "restart": "node scripts/ds.js restart",
     "status": "node scripts/ds.js status",
-    "backend": "python backend/app.py"
+    "backend": "python backend/app.py",
+    "dev": "node serve.js"
   }
 }

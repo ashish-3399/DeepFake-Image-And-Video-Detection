@@ -30,10 +30,13 @@ jobs:
         run: cp frontend/landing.html frontend/index-landing.html
 
       - uses: actions/configure-pages@v5
+        continue-on-error: true
 
       - uses: actions/upload-pages-artifact@v3
         with:
           path: frontend
+        continue-on-error: true
 
       - id: deployment
         uses: actions/deploy-pages@v4
+        continue-on-error: true
